@@ -1,0 +1,7 @@
+coverage
+pytest
+pytest-cov
+pytest-runner
+pylint
+safety
+bandit

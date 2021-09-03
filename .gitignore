@@ -1,0 +1,8 @@
+.eggs/
+build/
+dist/
+**/*.egg-info/
+**/__pycache__/
+.coverage
+**/.pyinstaller_dispatcher.py
+tests/testdata/simple/*.spec
