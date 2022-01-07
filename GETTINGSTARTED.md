@@ -40,6 +40,7 @@ The profiling is done with the built-in *cProfile* and the reports(binary and tx
 Post-mortem debugger is activated when the main entrypoint of the program throws the exception.
 
 
+#### Package configuration
 Let's assume we have the following entrypoints defined in the setup.py:
 
 ```python
@@ -60,10 +61,22 @@ setup(
 )
 ```
 
-*Note*: It is possible to place it elsewhere eg. setup.cfg or in setup.toml as long as it follows the standard.
+It is also possible to place it in setup.cfg:
 
+```ini
+...
+[options.entry_points]
+console_scripts =
+    bms = bmslib.cli:main
+    bms-python = bmslib.cli:do_bms_python
+    bms-gdb-wrapper = bmslib.gdb_wrapper:main
+...
+```
 
+#### Building and installing single-binary deliverables
 ```sh
+# Assuming bdist_pyinstaller package is pre-installed, we can execute it as follows:
+python setup.py bdist_pyinstaller
 
 # The bundle can be found under pyinstaller_dist and its name is composed <package_name>-<pacakge-version>
 ls pyinstaller_dist/
@@ -85,6 +98,31 @@ Apart from the links mapped from the entries defined in the console_scripts ther
 
 *Note*: The resulting binaries come with all their dependencies - including the python runtime and all the packages and libraries they need. The only requirement is that the OS that they are running on is shipped with glibc compliant with the binaries and there are some basic tools like tar, gz etc installed on it which is usually fulfilled on most of the linux distributions.
 
+#### Special considerations
+
+In some cases the bundle may be significant in size and the bootstrap process adds non-trivial overhead(typically ~1s, but it may vary). In this case one may consider using a one-directory bundle, which allows to skip this stage, which in many cases leads to a consistently better performance when comparing to a classic deployment. This happens due to a simplified package lookup as well as the fact the packages are frozen in the archive and processed in memory rather than reading them from disk.
+
+Buidling a one-dir deliverable:
+
+```sh
+python setup.py bdist_pyinstaller --one_dir
+```
+
+All the extra non-python resources from all packages *within* the scope of the project are automatically bundled in. However, the same does not apply to dependencies, which are only included on python level.
+When one needs to include the resources from the dependencies, it is possbile by passing a list of modules to be considered.
+
+Including resources from dependencies:
+
+```sh
+python setup.py bdist_pyinstaller --extra-modules=module_one,module.two,etc
+```
+
+The resources would be accessible in the same way as if the package was installed by pip:
+```python
+import os
+import module_one
+resource_location = os.path.join(os.path.dirname(module_one.__file__), "resource.txt")
+```
 
 ### Development
 

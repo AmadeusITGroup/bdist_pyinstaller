@@ -6,3 +6,4 @@ dist/
 .coverage
 **/.pyinstaller_dispatcher.py
 tests/testdata/simple/*.spec
+.coverage*
