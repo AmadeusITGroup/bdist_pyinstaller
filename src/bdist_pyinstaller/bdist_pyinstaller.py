@@ -83,6 +83,12 @@ class PyInstalerCmd(Command):
             "extra arguments to be passed to pyinstaller",
             "(default: None)",
         ),
+        (
+            "extra-modules=",
+            None,
+            "modules to be explicitly bundled-in",
+            "(default: None)",
+        ),
         ("one-dir", None, "one directory mode", "(default: false)"),
     ]
     boolean_options = [
@@ -93,6 +99,7 @@ class PyInstalerCmd(Command):
         self.bdist_dir = None
         self.dist_dir = None
         self.extra_args = None
+        self.extra_modules = None
         self.one_dir = False
 
     def finalize_options(self):
@@ -346,6 +353,19 @@ if __name__ == "__main__":
                 [p.split(".", 1)[0] for p in self.distribution.packages]
             )
             packages_to_harvest.add("parso")  # Note: It is required for IPython
+
+
+            extra_modules = self.distribution.command_options.get(
+                "bdist_pyinstaller", {}
+            ).get("extra_modules", ("", ""))[1]
+            if extra_modules:
+                packages_to_harvest.update(
+                    [
+                        extra_module.strip()
+                        for extra_module in self.extra_modules.split(",")
+                        if extra_module.strip()
+                    ]
+                )
 
             packages_to_harvest_list = [
                 package_name for _, package_name, _ in console_scripts
