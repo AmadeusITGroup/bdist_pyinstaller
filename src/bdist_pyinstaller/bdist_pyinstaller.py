@@ -13,11 +13,16 @@
 #    See the License for the specific language governing permissions and
 #    limitations under the License.
 import sys
+import platform
 import traceback
 import os
 import re
 from itertools import chain
 from distutils.core import Command
+from distutils.debug import DEBUG
+from distutils.errors import *
+from distutils.file_util import write_file
+from distutils import log
 from copy import copy
 import subprocess
 import importlib
@@ -90,10 +95,9 @@ class PyInstalerCmd(Command):
             "(default: None)",
         ),
         ("one-dir", None, "one directory mode", "(default: false)"),
+        ("rpm", None, "create rpm deliverable", "(default: false)"),
     ]
-    boolean_options = [
-        "one-dir",
-    ]
+    boolean_options = ["one-dir", "rpm"]
 
     def initialize_options(self):
         self.bdist_dir = None
@@ -101,11 +105,17 @@ class PyInstalerCmd(Command):
         self.extra_args = None
         self.extra_modules = None
         self.one_dir = False
+        self.rpm = False
+        self.aliases = []
 
     def finalize_options(self):
         if self.bdist_dir is None:
             bdist_base = self.get_finalized_command("bdist").bdist_base
             self.bdist_dir = os.path.join(bdist_base, "bdist_pyinstaller")
+
+        if self.dist_dir is None:
+            bdist_base = self.get_finalized_command("bdist").bdist_base
+            self.dist_dir = os.path.join(bdist_base, "bdist_pyinstaller")
 
     def run(self):
         if not self.distribution.packages:
@@ -118,14 +128,6 @@ class PyInstalerCmd(Command):
         if index_url:
             index_url_args.extend(["--index-url", index_url])
 
-        # Note: that's primarily for pulling in the deps
-        subprocess.check_call(
-            " ".join(
-                chain([sys.executable, "-m", "pip", "install", "."], index_url_args)
-            ),
-            shell=True,
-        )
-
         subprocess.check_call(
             " ".join(
                 chain(
@@ -137,9 +139,18 @@ class PyInstalerCmd(Command):
                         "pyinstaller",
                         "psutil",
                         "ipython",
+                        "tomli",
                     ),
                     index_url_args,
                 )
+            ),
+            shell=True,
+        )
+
+        # Note: that's primarily for pulling in dependencies
+        subprocess.check_call(
+            " ".join(
+                chain([sys.executable, "-m", "pip", "install", "."], index_url_args)
             ),
             shell=True,
         )
@@ -306,8 +317,10 @@ def main():
                     sample_import_module=sample_import_module,
                 )
             )
+            self.aliases.append("{}-python".format(self.distribution.get_name()))
 
             for script_name, package_name, function_name in console_scripts:
+                self.aliases.append(script_name)
                 if function_name:
                     pyinstaller_dispatcher_fl.write(
                         """
@@ -354,11 +367,7 @@ if __name__ == "__main__":
             )
             packages_to_harvest.add("parso")  # Note: It is required for IPython
 
-
-            extra_modules = self.distribution.command_options.get(
-                "bdist_pyinstaller", {}
-            ).get("extra_modules", ("", ""))[1]
-            if extra_modules:
+            if self.extra_modules:
                 packages_to_harvest.update(
                     [
                         extra_module.strip()
@@ -377,7 +386,7 @@ if __name__ == "__main__":
                 try:
                     _package_ = importlib.import_module(package_name)
                 except:
-                    print(f"It was not possible to import: {package_name}")
+                    log.error(f"It was not possible to import: {package_name}")
                     continue
 
                 PACKAGE__ROOT = os.path.join(os.path.dirname(_package_.__file__))
@@ -426,26 +435,13 @@ if __name__ == "__main__":
                 for item in hidden_imports
             ]
 
-            pyinstaller_dist = self.distribution.command_options.get(
-                "bdist_pyinstaller", {}
-            ).get("dist_dir", ("", os.path.join(os.getcwd(), "pyinstaller_dist")))[1]
+            pyinstaller_dist = self.dist_dir or os.path.join(
+                os.getcwd(), "pyinstaller_dist"
+            )
             if not os.path.exists(pyinstaller_dist):
                 os.makedirs(pyinstaller_dist)
 
-            one_dir = self.distribution.command_options.get(
-                "bdist_pyinstaller", {}
-            ).get("one_dir", False)
-            extra_args = self.distribution.command_options.get(
-                "bdist_pyinstaller", {}
-            ).get("extra_args", ("", ""))[1]
-            if extra_args:
-                """
-                NOTE: This is a very simple way of passing extra paramters to pyinstaller.
-                    It wouldn't handle nested quoting + blank spaces. Work in progress.
-                """
-                extra_args = [arg.strip() for arg in extra_args.split() if arg.strip()]
-
-            distribution_mode = "--onedir" if one_dir else "--onefile"
+            distribution_mode = "--onedir" if self.one_dir else "--onefile"
             target_name = "{}-{}".format(
                 self.distribution.get_name(), self.distribution.get_version()
             )
@@ -462,12 +458,18 @@ if __name__ == "__main__":
                 PYINSTALLER_DISPATCHER,
             ]
             sys.argv.extend(add_extras_cmd)
-            if extra_args:
-                sys.argv.extend(extra_args)
+            if self.extra_args:
+                """
+                NOTE: This is a very simple way of passing extra paramters to pyinstaller.
+                    It wouldn't handle nested quoting + blank spaces. Work in progress.
+                """
+                sys.argv.extend(
+                    [arg.strip() for arg in self.extra_args.split() if arg.strip()]
+                )
 
             sys.argc = len(sys.argv)
             pyinstaller_run()
-            if one_dir:
+            if self.one_dir:
                 with tarfile.open(
                     os.path.join(pyinstaller_dist, "{}.tar.gz".format(target_name)),
                     mode="w:gz",
@@ -477,5 +479,181 @@ if __name__ == "__main__":
                         arcname=target_name,
                         recursive=True,
                     )
+
+            if self.rpm:
+                self.create_rpm(pyinstaller_dist, target_name)
+
         finally:
             sys.argv = _argv_
+
+    def create_rpm(self, dist_location, dist_name):
+        # Make all necessary directories
+        rpm_base = os.path.join(dist_location, "rpm")
+        rpm_dir = {}
+        for d in ("SOURCES", "SPECS", "BUILD", "RPMS", "SRPMS"):
+            rpm_dir[d] = os.path.join(rpm_base, d)
+            self.mkpath(rpm_dir[d])
+        spec_dir = rpm_dir["SPECS"]
+
+        spec_path = os.path.join(spec_dir, f"{self.distribution.get_name()}.spec")
+        self.execute(
+            write_file,
+            (spec_path, self._generate_spec_file(dist_location, dist_name)),
+            "writing '%s'" % spec_path,
+        )
+
+        # build package
+        log.info("building RPMs")
+        rpm_cmd = ["rpmbuild"]
+
+        rpm_cmd.append("-bb")
+        rpm_cmd.extend(["--define", "_topdir %s" % os.path.abspath(rpm_base)])
+        rpm_cmd.append("--clean")
+
+        rpm_cmd.append(spec_path)
+
+        nvr_string = "%{name}-%{version}-%{release}"
+        src_rpm = nvr_string + ".src.rpm"
+        non_src_rpm = "%{arch}/" + nvr_string + ".%{arch}.rpm"
+        q_cmd = r"rpm -q --qf '%s %s\n' --specfile '%s'" % (
+            src_rpm,
+            non_src_rpm,
+            spec_path,
+        )
+
+        out = os.popen(q_cmd)
+        try:
+            binary_rpms = []
+            source_rpm = None
+            while True:
+                line = out.readline()
+                if not line:
+                    break
+                l = line.strip().split()
+                assert len(l) == 2
+                binary_rpms.append(l[1])
+                # The source rpm is named after the first entry in the spec file
+                if source_rpm is None:
+                    source_rpm = l[0]
+
+            status = out.close()
+            if status:
+                raise DistutilsExecError("Failed to execute: %s" % repr(q_cmd))
+
+        finally:
+            out.close()
+
+        self.spawn(rpm_cmd)
+
+        if not self.dry_run:
+            pyversion = "any"
+            for rpm in binary_rpms:
+                rpm = os.path.join(rpm_dir["RPMS"], rpm)
+                if os.path.exists(rpm):
+                    self.move_file(rpm, self.dist_dir)
+                    filename = os.path.join(self.dist_dir, os.path.basename(rpm))
+                    self.distribution.dist_files.append(
+                        ("bdist_pyinstaller", pyversion, filename)
+                    )
+
+    def _generate_spec_file(self, dist_location, dist_name):
+        """Generate the text of an RPM spec file and return it as a
+        list of strings (one per line).
+        """
+        # definitions and headers
+        spec_file = [
+            f"%define name {self.distribution.get_name()}",
+            f"%define version {self.distribution.get_version().replace('-','_')}",
+            f"%define unmangled_version {self.distribution.get_version()}",
+            f"%define release 1",
+            "",
+            f"Summary: {self.distribution.get_description()}",
+        ]
+
+        spec_file.extend(
+            [
+                "Name: %{name}",
+                "Version: %{version}",
+                "Release: %{release}",
+            ]
+        )
+
+        spec_file.append("Source0: %{name}-%{unmangled_version}.tar.gz")
+
+        spec_file.extend(
+            [
+                f"License: {self.distribution.get_license()}",
+                f"Group: Development/Libraries",
+                "BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-buildroot",
+                "Prefix: %{_prefix}",
+            ]
+        )
+
+        spec_file.append("BuildArch: %s" % platform.machine())
+
+        if self.distribution.get_url() != "UNKNOWN":
+            spec_file.append("Url: " + self.distribution.get_url())
+
+        spec_file.append("AutoReq: 0")
+
+        spec_file.extend(["", "%description", self.distribution.get_long_description()])
+
+        dist_location = os.path.abspath(os.path.join(dist_location, dist_name))
+        install_cmds = [
+            "mkdir -p usr/bin",
+        ]
+        install_cmds.extend(
+            [
+                "ln -f {} usr/bin/{}".format(dist_location, alias)
+                for alias in self.aliases
+            ]
+        )
+        install_cmds.extend(
+            [
+                "mkdir -p $RPM_BUILD_ROOT",
+                "cp -ar ./usr $RPM_BUILD_ROOT/",
+            ]
+        )
+
+        script_options = [
+            ("prep", "prep_script", None),
+            ("build", "build_script", None),
+            ("install", "install_script", install_cmds),
+            ("clean", "clean_script", "rm -rf $RPM_BUILD_ROOT"),
+            ("verifyscript", "verify_script", None),
+            ("pre", "pre_install", None),
+            ("post", "post_install", None),
+            ("preun", "pre_uninstall", None),
+            ("postun", "post_uninstall", None),
+        ]
+
+        for (rpm_opt, attr, default) in script_options:
+            # Insert contents of file referred to, if no file is referred to
+            # use 'default' as contents of script
+            val = getattr(self, attr, None)
+            if val or default:
+                spec_file.extend(
+                    [
+                        "",
+                        "%" + rpm_opt,
+                    ]
+                )
+                if val:
+                    with open(val) as f:
+                        spec_file.extend(f.read().split("\n"))
+                elif isinstance(default, list):
+                    spec_file.extend(default)
+                else:
+                    spec_file.append(default)
+
+        # files section
+        spec_file.extend(
+            [
+                "",
+                "%files",
+            ]
+        )
+        spec_file.extend(["/usr/bin/{}".format(alias) for alias in self.aliases])
+
+        spec_file.append("%defattr(-,root,root)")
+        return spec_file
