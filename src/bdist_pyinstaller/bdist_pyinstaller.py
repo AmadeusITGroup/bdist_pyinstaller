@@ -96,8 +96,9 @@ class PyInstalerCmd(Command):
         ),
         ("one-dir", None, "one directory mode", "(default: false)"),
         ("rpm", None, "create rpm deliverable", "(default: false)"),
+        ("deb", None, "create deb deliverable", "(default: false)"),
     ]
-    boolean_options = ["one-dir", "rpm"]
+    boolean_options = ["one-dir", "rpm", "deb"]
 
     def initialize_options(self):
         self.bdist_dir = None
@@ -106,6 +107,7 @@ class PyInstalerCmd(Command):
         self.extra_modules = None
         self.one_dir = False
         self.rpm = False
+        self.deb = False
         self.aliases = []
 
     def finalize_options(self):
@@ -479,9 +481,11 @@ if __name__ == "__main__":
                         arcname=target_name,
                         recursive=True,
                     )
-
             if self.rpm:
                 self.create_rpm(pyinstaller_dist, target_name)
+
+            if self.deb:
+                self.create_deb(pyinstaller_dist, target_name)
 
         finally:
             sys.argv = _argv_
@@ -498,7 +502,7 @@ if __name__ == "__main__":
         spec_path = os.path.join(spec_dir, f"{self.distribution.get_name()}.spec")
         self.execute(
             write_file,
-            (spec_path, self._generate_spec_file(dist_location, dist_name)),
+            (spec_path, self._generate_rpm_spec_file(dist_location, dist_name)),
             "writing '%s'" % spec_path,
         )
 
@@ -556,7 +560,79 @@ if __name__ == "__main__":
                         ("bdist_pyinstaller", pyversion, filename)
                     )
 
-    def _generate_spec_file(self, dist_location, dist_name):
+    def create_deb(self, dist_location, dist_name):
+        # Make all necessary directories
+        binary_target_base = "usr/bin"
+        deb_base = os.path.join(dist_location, "deb")
+        binaries_target_path = os.path.join(deb_base, binary_target_base)
+        spec_path = os.path.join(deb_base, "DEBIAN", "control")
+        self.mkpath(binaries_target_path)
+        self.mkpath(os.path.dirname(spec_path))
+        for alias in self.aliases:
+            dst = os.path.join(binaries_target_path, alias)
+            src = os.path.join(dist_location, dist_name)
+            if os.path.exists(dst):
+                os.unlink(dst)
+            os.link(src, dst)
+
+        arch_string = self._get_deb_build_arch()
+        self.execute(
+            write_file,
+            (
+                spec_path,
+                self._generate_deb_spec_file(dist_location, dist_name, arch_string),
+            ),
+            f"writing '{spec_path}'",
+        )
+
+        os.chmod(deb_base, mode=0o755)
+        os.chmod(os.path.dirname(spec_path), mode=0o755)
+
+        # build package
+        log.info("building DEBs")
+        release = "1"
+        deb_filename = os.path.join(
+            deb_base,
+            f"{self.distribution.get_name()}_{self.distribution.get_version()}_{release}_{arch_string}.deb",
+        )
+        deb_cmd = ["dpkg-deb", "--build", "--root-owner-group", deb_base, deb_filename]
+
+        self.spawn(deb_cmd)
+        if not self.dry_run:
+            pyversion = "any"
+            if os.path.exists(deb_filename):
+                self.move_file(deb_filename, self.dist_dir)
+                filename = os.path.join(self.dist_dir, os.path.basename(deb_filename))
+                self.distribution.dist_files.append(
+                    ("bdist_pyinstaller", pyversion, filename)
+                )
+
+    def _get_deb_build_arch(self):
+        arch_string = "amd64"
+        q_cmd = "dpkg-architecture -q DEB_BUILD_ARCH"
+        out = os.popen("dpkg-architecture -q DEB_BUILD_ARCH")
+        try:
+            line = out.readline()
+            if line:
+                arch_string = line.strip()
+            status = out.close()
+            if status:
+                raise DistutilsExecError(f"Failed to execute: {q_cmd}")
+
+        finally:
+            out.close()
+        return arch_string
+
+    def _generate_deb_spec_file(self, dist_location, dist_name, arch_string):
+        return [
+            f"Package: {self.distribution.get_name()}",
+            f"Version: {self.distribution.get_version().replace('-','_')}",
+            f"Architecture: {arch_string}",
+            f"Maintainer: {self.distribution.get_author()} <{self.distribution.get_author_email()}>",
+            f"""Description: {self.distribution.get_description()}""",
+        ]
+
+    def _generate_rpm_spec_file(self, dist_location, dist_name):
         """Generate the text of an RPM spec file and return it as a
         list of strings (one per line).
         """
