@@ -595,7 +595,7 @@ if __name__ == "__main__":
             deb_base,
             f"{self.distribution.get_name()}_{self.distribution.get_version()}_{release}_{arch_string}.deb",
         )
-        deb_cmd = ["dpkg-deb", "--build", "--root-owner-group", deb_base, deb_filename]
+        deb_cmd = ["dpkg-deb", "--build", deb_base, deb_filename]
 
         self.spawn(deb_cmd)
         if not self.dry_run:
